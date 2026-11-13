@@ -55,3 +55,6 @@ Thứ tự: bật ARCHIVELOG + supplemental logging DB → `cdc_ops source-creat
 - Lab dùng 1 instance Oracle XE 21c cho 3 schema; production nên tách nguồn / Mirror-C360 và nâng cấu hình cho 138 triệu dòng (`docs/OPERATIONS.md`).
 - Debezium Oracle yêu cầu ARCHIVELOG + user `c##dbzuser` (`sql/01_sys_debezium.sql`); script bật ARCHIVELOG khởi động lại DB trong container.
 - API chưa báo bản ghi đã xóa (QA Q13).
+<img width="1900" height="946" alt="Screenshot 2026-11-13 145147" src="https://github.com/user-attachments/assets/abdde8ca-8577-49bf-8e26-60df02e35e1d" />
+<img width="1919" height="644" alt="Screenshot 2026-11-13 145227" src="https://github.com/user-attachments/assets/7a5596ad-f394-46ab-9ab1-00f7dfb00d89" />
+<img width="1918" height="939" alt="Screenshot 2026-11-13 145214" src="https://github.com/user-attachments/assets/8fca3b64-4850-47d6-a25d-f1fdba01fd0b" />
