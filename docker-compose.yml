@@ -1,0 +1,79 @@
+# Hạ tầng lab: Oracle XE 21c (nguồn + Mirror + C360 trong 1 instance, 3 schema) + Kafka + Debezium Connect (+ Airflow, Kafka UI).
+#   docker compose up -d oracle zookeeper kafka connect          # lõi
+#   docker compose --profile orchestration up -d airflow         # Airflow (http://localhost:8080)
+#   docker compose --profile tools up -d kafka-ui                # giám sát Kafka (http://localhost:8088)
+# Cần ~8 GB RAM trống cho toàn bộ. Production: tách nguồn / Mirror-C360 thành các instance riêng.
+name: hgd
+services:
+  oracle:
+    image: gvenzl/oracle-xe:21-slim
+    container_name: hgd-oracle
+    environment:
+      ORACLE_PASSWORD: ${ORA_SYS_PASSWORD:-oracle_sys_pwd}
+    ports: ["1521:1521"]
+    volumes: [oracle-data:/opt/oracle/oradata]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+
+  zookeeper:
+    image: quay.io/debezium/zookeeper:2.7.3.Final
+    container_name: hgd-zookeeper
+    volumes: [zk-data:/zookeeper/data, zk-txns:/zookeeper/txns]
+
+  kafka:
+    image: quay.io/debezium/kafka:2.7.3.Final
+    container_name: hgd-kafka
+    depends_on: [zookeeper]
+    environment:
+      ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LOG_RETENTION_HOURS: "168"          # giữ 7 ngày: đủ để phát lại sau sự cố/Full Load
+    ports: ["9092:9092"]
+    volumes: [kafka-data:/kafka/data]
+
+  connect:
+    build: ./docker/connect
+    container_name: hgd-connect
+    depends_on: [kafka, oracle]
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: "hgd-connect"
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+    ports: ["8083:8083"]
+
+  airflow:
+    profiles: ["orchestration"]
+    build: ./docker/airflow
+    container_name: hgd-airflow
+    depends_on: [oracle]
+    env_file: [.env]
+    environment:
+      ORA_HOST: oracle
+      PYTHONPATH: /opt/project
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/project/airflow/dags
+    volumes: [".:/opt/project"]
+    ports: ["8080:8080"]
+    command: standalone
+
+  kafka-ui:
+    profiles: ["tools"]
+    image: provectuslabs/kafka-ui:latest
+    container_name: hgd-kafka-ui
+    depends_on: [kafka]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: hgd
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: connect
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+    ports: ["8088:8080"]
+
+volumes:
+  oracle-data:
+  zk-data:
+  zk-txns:
+  kafka-data:

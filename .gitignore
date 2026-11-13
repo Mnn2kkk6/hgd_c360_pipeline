@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+out/*
+!out/.gitkeep
+.pytest_cache/
+*.log
+data/big/
+.venv/
+docker/connect/libs/*
+!docker/connect/libs/.gitkeep
+/patch_*.py
+/check_*.py
+/test_batch.py

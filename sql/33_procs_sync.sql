@@ -1,0 +1,191 @@
+-- Chạy bằng user C360. Thủ tục log, Full Load và Near Real-time.
+CREATE OR REPLACE PROCEDURE PRC_C360_LOG (
+  p_type IN VARCHAR2, p_status IN VARCHAR2, p_start IN TIMESTAMP,
+  p_queue IN NUMBER DEFAULT NULL, p_keys IN NUMBER DEFAULT NULL,
+  p_merged IN NUMBER DEFAULT NULL, p_deleted IN NUMBER DEFAULT NULL, p_msg IN VARCHAR2 DEFAULT NULL
+) IS
+  PRAGMA AUTONOMOUS_TRANSACTION;   -- log độc lập với transaction chính (ghi được cả khi ROLLBACK do lỗi)
+  v_now TIMESTAMP := SYSTIMESTAMP;
+BEGIN
+  INSERT INTO C360_SYNC_LOG (JOB_TYPE, START_TIME, END_TIME, QUEUE_ROWS, KEYS_COUNT, MERGED_ROWS, DELETED_ROWS, DURATION_SEC, STATUS, MESSAGE)
+  VALUES (p_type, p_start, v_now, p_queue, p_keys, p_merged, p_deleted,
+          EXTRACT(SECOND FROM (v_now - p_start)) + 60 * EXTRACT(MINUTE FROM (v_now - p_start)) + 3600 * EXTRACT(HOUR FROM (v_now - p_start)),
+          p_status, SUBSTR(p_msg, 1, 2000));
+  COMMIT;
+END;
+/
+-------------------------------------------------------------------------------
+-- NEAR REAL-TIME: đọc từng lô từ Queue, MERGE công dân còn hợp lệ, DELETE công dân không còn dòng hợp lệ.
+--  * Khóa dòng SYNC_CONTROL (FOR UPDATE SKIP LOCKED): chỉ 1 phiên NRT chạy; Full Load phải chờ lô đang chạy xong.
+--  * CẮT LÔ AN TOÀN (v_cut): ID Queue có thể COMMIT không theo thứ tự -> KHÔNG dùng "ID <= max" để xóa.
+--    Mỗi lô chốt đúng tập ID đã thấy (C360_TMP_IDS) và chỉ xóa đúng các ID đó. Dòng commit muộn (kể cả ID nhỏ hơn)
+--    không nằm trong tập nên được giữ lại cho lô sau => không xóa nhầm, không bỏ sót.
+-------------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE PRC_C360_NRT (
+  p_batch       IN NUMBER DEFAULT 20000,
+  p_max_seconds IN NUMBER DEFAULT 50
+) IS
+  v_deadline DATE := SYSDATE + p_max_seconds / 86400;
+  v_pause    NUMBER;
+  v_t0       TIMESTAMP;
+  v_q NUMBER; v_keys NUMBER; v_merged NUMBER; v_del NUMBER; v_cut NUMBER;
+BEGIN
+  LOOP
+    v_t0 := SYSTIMESTAMP;
+    BEGIN
+      SELECT PAUSE_FLAG INTO v_pause FROM C360_SYNC_CONTROL WHERE JOB_NAME = 'C360' FOR UPDATE SKIP LOCKED;
+    EXCEPTION WHEN NO_DATA_FOUND THEN
+      PRC_C360_LOG('NRT', 'SKIPPED', v_t0, p_msg => 'SYNC_CONTROL đang bị khóa (Full Load hoặc phiên NRT khác)');
+      RETURN;
+    END;
+    IF v_pause = 1 THEN
+      ROLLBACK;
+      PRC_C360_LOG('NRT', 'SKIPPED', v_t0, p_msg => 'PAUSE_FLAG=1 (Full Load đang chạy)');
+      RETURN;
+    END IF;
+
+    INSERT INTO C360_TMP_IDS (ID) SELECT ID FROM C360_QUEUE ORDER BY ID FETCH FIRST p_batch ROWS ONLY;
+    v_q := SQL%ROWCOUNT;
+    IF v_q = 0 THEN ROLLBACK; RETURN; END IF;     -- Queue rỗng: không ghi log để tránh nhiễu
+    SELECT MAX(ID) INTO v_cut FROM C360_TMP_IDS;
+
+    INSERT INTO C360_TMP_KEYS (MA_CD)
+      SELECT DISTINCT q.MA_CD FROM C360_QUEUE q JOIN C360_TMP_IDS i ON i.ID = q.ID;
+    v_keys := SQL%ROWCOUNT;
+
+    MERGE INTO C360_THONG_TIN_CA_NHAN t
+    USING (SELECT v.* FROM V_C360_NORMALIZED v WHERE v.MA_SO_BHXH IN (SELECT MA_CD FROM C360_TMP_KEYS)) s
+    ON (t.MA_SO_BHXH = s.MA_SO_BHXH)
+    WHEN MATCHED THEN UPDATE SET
+      t.MA_SO_BHXH_CU = s.MA_SO_BHXH_CU,
+      t.SO_DINH_DANH = s.SO_DINH_DANH,
+      t.HO_TEN = s.HO_TEN,
+      t.HO_TEN_KHONG_DAU = s.HO_TEN_KHONG_DAU,
+      t.GIOI_TINH = s.GIOI_TINH,
+      t.NGAY_SINH = s.NGAY_SINH,
+      t.NGAY_SINH_GOC = s.NGAY_SINH_GOC,
+      t.IS_ALIVE = s.IS_ALIVE,
+      t.DEAD_DATE = s.DEAD_DATE,
+      t.SO_DIEN_THOAI = s.SO_DIEN_THOAI,
+      t.SO_DIEN_THOAI_GOC = s.SO_DIEN_THOAI_GOC,
+      t.EMAIL = s.EMAIL,
+      t.QUOC_TICH_MA = s.QUOC_TICH_MA,
+      t.QUOC_TICH_TEN = s.QUOC_TICH_TEN,
+      t.QUOC_TICH_GOC = s.QUOC_TICH_GOC,
+      t.DAN_TOC_ID = s.DAN_TOC_ID,
+      t.DAN_TOC_MA = s.DAN_TOC_MA,
+      t.DAN_TOC_TEN = s.DAN_TOC_TEN,
+      t.MA_HO_GD = s.MA_HO_GD,
+      t.QH_CHU_HO = s.QH_CHU_HO,
+      t.MA_TINH = s.MA_TINH,
+      t.TEN_TINH = s.TEN_TINH,
+      t.MA_XA = s.MA_XA,
+      t.TEN_XA = s.TEN_XA,
+      t.MA_TINH_GOC = s.MA_TINH_GOC,
+      t.MA_XA_GOC = s.MA_XA_GOC,
+      t.NGUON_MAP_XA = s.NGUON_MAP_XA,
+      t.MA_TINH_LH = s.MA_TINH_LH,
+      t.TEN_TINH_LH = s.TEN_TINH_LH,
+      t.MA_XA_LH = s.MA_XA_LH,
+      t.TEN_XA_LH = s.TEN_XA_LH,
+      t.MA_TINH_LH_GOC = s.MA_TINH_LH_GOC,
+      t.MA_XA_LH_GOC = s.MA_XA_LH_GOC,
+      t.NGUON_MAP_XA_LH = s.NGUON_MAP_XA_LH,
+      t.MA_TINH_KS = s.MA_TINH_KS,
+      t.TEN_TINH_KS = s.TEN_TINH_KS,
+      t.MA_XA_KS = s.MA_XA_KS,
+      t.TEN_XA_KS = s.TEN_XA_KS,
+      t.MA_TINH_KS_GOC = s.MA_TINH_KS_GOC,
+      t.MA_XA_KS_GOC = s.MA_XA_KS_GOC,
+      t.NGUON_MAP_XA_KS = s.NGUON_MAP_XA_KS,
+      t.DIA_CHI = s.DIA_CHI,
+      t.DC_LIEN_LAC = s.DC_LIEN_LAC,
+      t.DQ_FLAGS = s.DQ_FLAGS,
+      t.MODIFY_DATE_NGUON = s.MODIFY_DATE_NGUON,
+      t.SYNC_DATE = s.SYNC_DATE
+    WHEN NOT MATCHED THEN INSERT (MA_SO_BHXH,MA_SO_BHXH_CU,SO_DINH_DANH,HO_TEN,HO_TEN_KHONG_DAU,GIOI_TINH,NGAY_SINH,NGAY_SINH_GOC,IS_ALIVE,DEAD_DATE,SO_DIEN_THOAI,SO_DIEN_THOAI_GOC,EMAIL,QUOC_TICH_MA,QUOC_TICH_TEN,QUOC_TICH_GOC,DAN_TOC_ID,DAN_TOC_MA,DAN_TOC_TEN,MA_HO_GD,QH_CHU_HO,MA_TINH,TEN_TINH,MA_XA,TEN_XA,MA_TINH_GOC,MA_XA_GOC,NGUON_MAP_XA,MA_TINH_LH,TEN_TINH_LH,MA_XA_LH,TEN_XA_LH,MA_TINH_LH_GOC,MA_XA_LH_GOC,NGUON_MAP_XA_LH,MA_TINH_KS,TEN_TINH_KS,MA_XA_KS,TEN_XA_KS,MA_TINH_KS_GOC,MA_XA_KS_GOC,NGUON_MAP_XA_KS,DIA_CHI,DC_LIEN_LAC,DQ_FLAGS,MODIFY_DATE_NGUON,SYNC_DATE)
+    VALUES (s.MA_SO_BHXH,s.MA_SO_BHXH_CU,s.SO_DINH_DANH,s.HO_TEN,s.HO_TEN_KHONG_DAU,s.GIOI_TINH,s.NGAY_SINH,s.NGAY_SINH_GOC,s.IS_ALIVE,s.DEAD_DATE,s.SO_DIEN_THOAI,s.SO_DIEN_THOAI_GOC,s.EMAIL,s.QUOC_TICH_MA,s.QUOC_TICH_TEN,s.QUOC_TICH_GOC,s.DAN_TOC_ID,s.DAN_TOC_MA,s.DAN_TOC_TEN,s.MA_HO_GD,s.QH_CHU_HO,s.MA_TINH,s.TEN_TINH,s.MA_XA,s.TEN_XA,s.MA_TINH_GOC,s.MA_XA_GOC,s.NGUON_MAP_XA,s.MA_TINH_LH,s.TEN_TINH_LH,s.MA_XA_LH,s.TEN_XA_LH,s.MA_TINH_LH_GOC,s.MA_XA_LH_GOC,s.NGUON_MAP_XA_LH,s.MA_TINH_KS,s.TEN_TINH_KS,s.MA_XA_KS,s.TEN_XA_KS,s.MA_TINH_KS_GOC,s.MA_XA_KS_GOC,s.NGUON_MAP_XA_KS,s.DIA_CHI,s.DC_LIEN_LAC,s.DQ_FLAGS,s.MODIFY_DATE_NGUON,s.SYNC_DATE);
+    v_merged := SQL%ROWCOUNT;
+
+    -- Công dân trong lô không còn dòng hợp lệ nào ở Mirror (bị xóa / đổi MA_CD / TYPEID, TRANG_THAI_DUYET bị loại)
+    DELETE FROM C360_THONG_TIN_CA_NHAN t
+    WHERE  t.MA_SO_BHXH IN (SELECT MA_CD FROM C360_TMP_KEYS)
+    AND    NOT EXISTS (SELECT 1 FROM MIRROR.VSS_HO_GD_NHANKHAU m
+                       WHERE m.MA_CD = t.MA_SO_BHXH
+                       AND   NVL(m.TYPEID, 'ZZ') NOT IN ('GT','GM','GG','GK')
+                       AND   NVL(m.TRANG_THAI_DUYET, 0) NOT IN (1, 3, 4));
+    v_del := SQL%ROWCOUNT;
+
+    DELETE FROM C360_QUEUE WHERE ID IN (SELECT ID FROM C360_TMP_IDS);   -- chỉ xóa đúng tập ID đã xử lý
+    UPDATE C360_SYNC_CONTROL SET LAST_NRT_RUN = SYSDATE, STATUS = 'IDLE' WHERE JOB_NAME = 'C360';
+    COMMIT;                                                              -- nhả khóa; GTT tự xóa
+    PRC_C360_LOG('NRT', 'OK', v_t0, v_q, v_keys, v_merged, v_del, 'v_cut=' || v_cut);
+
+    EXIT WHEN v_q < p_batch OR SYSDATE > v_deadline;
+  END LOOP;
+EXCEPTION WHEN OTHERS THEN
+  DECLARE v_err VARCHAR2(2000) := SUBSTR(SQLERRM || ' ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 2000);
+  BEGIN
+    ROLLBACK;
+    PRC_C360_LOG('NRT', 'ERROR', NVL(v_t0, SYSTIMESTAMP), p_msg => v_err);
+    RAISE;
+  END;
+END;
+/
+-------------------------------------------------------------------------------
+-- FULL LOAD: dựng lại toàn bộ C360 từ Mirror qua CÙNG view V_C360_NORMALIZED.
+--  1) Chờ lô NRT đang chạy kết thúc (FOR UPDATE chờ), đặt PAUSE_FLAG=1, COMMIT -> NRT các phút sau tự bỏ qua.
+--  2) Chụp snapshot ID Queue, TRUNCATE + INSERT SELECT.
+--  3) Chỉ xóa các ID Queue nằm trong snapshot; thay đổi phát sinh trong lúc Full Load được giữ lại cho phút sau.
+-------------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE PRC_C360_FULL_LOAD (p_parallel IN NUMBER DEFAULT 4) IS
+  v_t0 TIMESTAMP := SYSTIMESTAMP;
+  v_n  NUMBER;
+  v_snap NUMBER;
+  v_dummy NUMBER;
+BEGIN
+  SELECT PAUSE_FLAG INTO v_dummy FROM C360_SYNC_CONTROL WHERE JOB_NAME = 'C360' FOR UPDATE;   -- chờ NRT
+  UPDATE C360_SYNC_CONTROL SET PAUSE_FLAG = 1, STATUS = 'FULL_LOADING', NOTE = 'Full Load bắt đầu ' || TO_CHAR(SYSDATE, 'YYYY-MM-DD HH24:MI:SS')
+   WHERE JOB_NAME = 'C360';
+  COMMIT;
+
+  DELETE FROM C360_QUEUE_SNAP;
+  INSERT INTO C360_QUEUE_SNAP (ID) SELECT ID FROM C360_QUEUE;
+  v_snap := SQL%ROWCOUNT;
+  COMMIT;
+
+  EXECUTE IMMEDIATE 'TRUNCATE TABLE C360_THONG_TIN_CA_NHAN';
+  EXECUTE IMMEDIATE 'ALTER SESSION ENABLE PARALLEL DML';
+  EXECUTE IMMEDIATE
+    'INSERT /*+ APPEND PARALLEL(c, ' || TO_NUMBER(p_parallel) || ') */ INTO C360_THONG_TIN_CA_NHAN c (MA_SO_BHXH,MA_SO_BHXH_CU,SO_DINH_DANH,HO_TEN,HO_TEN_KHONG_DAU,GIOI_TINH,NGAY_SINH,NGAY_SINH_GOC,IS_ALIVE,DEAD_DATE,SO_DIEN_THOAI,SO_DIEN_THOAI_GOC,EMAIL,QUOC_TICH_MA,QUOC_TICH_TEN,QUOC_TICH_GOC,DAN_TOC_ID,DAN_TOC_MA,DAN_TOC_TEN,MA_HO_GD,QH_CHU_HO,MA_TINH,TEN_TINH,MA_XA,TEN_XA,MA_TINH_GOC,MA_XA_GOC,NGUON_MAP_XA,MA_TINH_LH,TEN_TINH_LH,MA_XA_LH,TEN_XA_LH,MA_TINH_LH_GOC,MA_XA_LH_GOC,NGUON_MAP_XA_LH,MA_TINH_KS,TEN_TINH_KS,MA_XA_KS,TEN_XA_KS,MA_TINH_KS_GOC,MA_XA_KS_GOC,NGUON_MAP_XA_KS,DIA_CHI,DC_LIEN_LAC,DQ_FLAGS,MODIFY_DATE_NGUON,SYNC_DATE) ' ||
+    'SELECT MA_SO_BHXH,MA_SO_BHXH_CU,SO_DINH_DANH,HO_TEN,HO_TEN_KHONG_DAU,GIOI_TINH,NGAY_SINH,NGAY_SINH_GOC,IS_ALIVE,DEAD_DATE,SO_DIEN_THOAI,SO_DIEN_THOAI_GOC,EMAIL,QUOC_TICH_MA,QUOC_TICH_TEN,QUOC_TICH_GOC,DAN_TOC_ID,DAN_TOC_MA,DAN_TOC_TEN,MA_HO_GD,QH_CHU_HO,MA_TINH,TEN_TINH,MA_XA,TEN_XA,MA_TINH_GOC,MA_XA_GOC,NGUON_MAP_XA,MA_TINH_LH,TEN_TINH_LH,MA_XA_LH,TEN_XA_LH,MA_TINH_LH_GOC,MA_XA_LH_GOC,NGUON_MAP_XA_LH,MA_TINH_KS,TEN_TINH_KS,MA_XA_KS,TEN_XA_KS,MA_TINH_KS_GOC,MA_XA_KS_GOC,NGUON_MAP_XA_KS,DIA_CHI,DC_LIEN_LAC,DQ_FLAGS,MODIFY_DATE_NGUON,SYNC_DATE FROM V_C360_NORMALIZED';
+  v_n := SQL%ROWCOUNT;
+  COMMIT;
+
+  DELETE FROM C360_QUEUE WHERE ID IN (SELECT ID FROM C360_QUEUE_SNAP);
+  DELETE FROM C360_QUEUE_SNAP;
+  UPDATE C360_SYNC_CONTROL SET PAUSE_FLAG = 0, STATUS = 'IDLE', LAST_FULL_LOAD = SYSDATE,
+         NOTE = 'Full Load xong ' || v_n || ' dòng' WHERE JOB_NAME = 'C360';
+  COMMIT;
+  PRC_C360_LOG('FULL', 'OK', v_t0, v_snap, NULL, v_n, NULL, 'snapshot queue=' || v_snap);
+EXCEPTION WHEN OTHERS THEN
+  DECLARE v_err VARCHAR2(2000) := SUBSTR(SQLERRM || ' ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 2000);
+  BEGIN
+    ROLLBACK;
+    -- GIỮ PAUSE_FLAG=1 khi lỗi: C360 có thể đang dở dang, cần xử lý tay rồi chạy lại Full Load.
+    UPDATE C360_SYNC_CONTROL SET STATUS = 'FULL_FAILED', NOTE = SUBSTR(v_err, 1, 500) WHERE JOB_NAME = 'C360';
+    COMMIT;
+    PRC_C360_LOG('FULL', 'ERROR', v_t0, p_msg => v_err);
+    RAISE;
+  END;
+END;
+/
+-- Nhả cờ tạm dừng thủ công sau khi đã xử lý sự cố Full Load
+CREATE OR REPLACE PROCEDURE PRC_C360_RESUME IS
+BEGIN
+  UPDATE C360_SYNC_CONTROL SET PAUSE_FLAG = 0, STATUS = 'IDLE' WHERE JOB_NAME = 'C360';
+  COMMIT;
+END;
+/
+-- Lịch chạy NRT mỗi phút bằng DBMS_SCHEDULER (tùy chọn; có thể dùng DAG Airflow hgd_c360_nrt thay thế)
+-- Tạo job: python -m hgd.tools.run_sql sql/34_scheduler_job.sql --as c360
