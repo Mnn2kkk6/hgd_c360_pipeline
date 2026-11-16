@@ -37,13 +37,23 @@
 **Full Load C360**: chờ lô NRT hiện tại → `PAUSE_FLAG=1` → chụp snapshot ID Queue (`C360_QUEUE_SNAP`) → `TRUNCATE` + `INSERT /*+ APPEND PARALLEL */ … SELECT` từ view → xóa đúng các ID thuộc snapshot → nhả cờ. Thay đổi phát sinh trong lúc Full Load nằm ngoài snapshot nên được NRT xử lý ngay sau đó. Lỗi → giữ `PAUSE_FLAG=1`, trạng thái `FULL_FAILED`; sau khi xử lý gọi `PRC_C360_FULL_LOAD` lại hoặc `PRC_C360_RESUME`.
 
 ## 5. Full Load Mirror & CDC
-1. `mirror_ops prepare`: tắt trigger, bỏ unique index.
-2. `cdc_ops source-create`: Debezium Oracle (`snapshot.mode=no_data`, `message.key.columns` cho cả 4 bảng).
-3. `full_load_spark`: `TRUNCATE` Mirror → đọc Oracle theo `ORA_HASH(MA_CD)` thành 8 phân vùng → ghi JDBC batch → đối chiếu số dòng.
-4. `mirror_ops create-index` (lỗi `ORA-01452` nếu trùng khóa) → `create-trigger`.
-5. `cdc_ops sink-create`: Debezium JDBC Sink, `upsert` + `delete.enabled`, khóa = `record_key`.
+**Thứ tự dựng lần đầu (không được đảo):**
+1. `mirror_ops prepare`: tắt trigger, bỏ các index trên Mirror (nạp direct-path nhanh).
+2. `cdc_ops source-create`: Debezium Oracle (`snapshot.mode=no_data`, `message.key.columns` cho cả 4 bảng). Từ đây mọi thay đổi ở nguồn được giữ trong Kafka.
+3. Full Load Mirror (Python hoặc Spark, xem dưới).
+4. `mirror_ops create-index`: unique `(MA_CD, MA_HO_GD)` + index `MODIFY_DATE` + index `SYNC_TS`.
+5. `PRC_REFRESH_MAP_DBHC` rồi `PRC_C360_FULL_LOAD` (C360 dựng từ Mirror đã nạp).
+6. `mirror_ops create-trigger` rồi `cdc_ops sink-create`: **trigger và sink bật SAU Full Load C360.** Sink phát lại các thay đổi còn nợ trong Kafka vào Mirror, trigger đẩy khóa vào Queue, NRT xử lý. Trong lúc nạp nền C360 chưa có gì ghi vào Mirror nên Queue không bị đẩy dữ liệu thừa.
 
-Vì sao hội tụ đúng: Kafka đã nhận mọi thay đổi từ trước Full Load; sau Full Load sink phát lại theo thứ tự, mỗi thay đổi là upsert/delete theo khóa nên trạng thái cuối bằng trạng thái nguồn mới nhất (chỉ có thể tạm thời "cũ hơn" trong lúc phát lại).
+Vì sao hội tụ đúng: Kafka đã nhận mọi thay đổi từ trước Full Load; sink phát lại theo thứ tự, mỗi thay đổi là upsert/delete theo khóa (lũy đẳng) nên trạng thái cuối bằng trạng thái nguồn mới nhất. `PRC_C360_FULL_LOAD` vẫn giữ cơ chế snapshot Queue để chạy lại an toàn khi hệ thống đã vận hành (không xóa nhầm dòng Queue phát sinh trong lúc nạp).
+
+**Full Load Mirror theo khối (`loadplan.py`):**
+- **Chia khối theo khoảng `MA_CD`**, không dùng `ORA_HASH`: mỗi luồng đọc một khoảng khóa (dùng unique index ở nguồn) nên mỗi dòng nguồn chỉ được đọc đúng 1 lần, thay vì N luồng quét toàn bảng N lần. Ranh giới lấy từ một mẫu `SAMPLE` (~100k khóa), không phải đếm hay sắp xếp cả bảng. Số khối mặc định = 4 × số luồng để cân tải.
+- **Sổ tiến độ `MIRROR.MIRROR_LOAD_CHUNK`**: mỗi khối `PENDING → RUNNING → DONE/FAILED`, commit riêng. Sự cố giữa chừng → `--resume`: bỏ qua khối `DONE`, xóa phần ghi dở của khối `RUNNING/FAILED` (theo khoảng khóa) rồi nạp lại; không `TRUNCATE`, không mất phần đã nạp. Chạy không có `--resume` = nạp mới (TRUNCATE + kế hoạch mới).
+- **Lệch số dòng cuối quá trình chỉ cảnh báo** (`[WARN]`), không dừng chuỗi: nguồn còn giao dịch lúc nạp và CDC sẽ bù. Tính đầy đủ của lần nạp do trạng thái khối bảo đảm (còn khối chưa `DONE` → lỗi). `--strict` để coi lệch là lỗi.
+- Giới hạn còn lại: đọc theo khoảng khóa là range scan chỉ mục + truy cập theo ROWID; nếu bảng nguồn có hệ số gom cụm (clustering factor) kém, I/O ngẫu nhiên có thể cao. Ở môi trường thật nên cân nhắc chia theo ROWID (`DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID`) nếu được cấp quyền.
+
+**Mirror có dấu vết đồng bộ:** cột `SYNC_TS` (mặc định `SYSTIMESTAMP` khi INSERT, trigger cập nhật khi UPDATE) và index `MODIFY_DATE`, `SYNC_TS`. View `C360.V_MIRROR_SYNC_LAG` cho biết giây kể từ lần đồng bộ cuối và số dòng đồng bộ trong 1 giờ; `reconcile` và dashboard hiển thị. Đánh đổi: 2 index thêm làm upsert của sink chậm hơn một chút.
 
 ## 6. API
 | Endpoint | Scope | Ghi chú |

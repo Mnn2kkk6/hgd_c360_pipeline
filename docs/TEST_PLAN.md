@@ -27,6 +27,10 @@ Chạy theo thứ tự; mỗi bước có tiêu chí đạt.
 | T12 | API | `uvicorn …`, tạo key, gọi 4 endpoint | Khớp mô tả; 409 với mã cũ trùng; audit ghi vào `C360_API_AUDIT_LOG` |
 | T13 | BI | `make bi` sau `PRC_REFRESH_DATAMART` | 3 tab hiển thị số liệu |
 
+| T14 | Full Load bị gián đoạn rồi chạy tiếp | `full_load_python --tables main --stop-after 3` (mô phỏng sự cố, thoát mã 3) rồi `--resume` | Lần 2 in `TIẾP TỤC`, chỉ nạp các khối còn lại; số dòng Mirror = nguồn; không TRUNCATE lại |
+| T15 | Lệch số dòng không làm gãy chuỗi | Thêm vài dòng vào nguồn trong lúc Full Load chạy | In `[WARN] lệch +n dòng`, mã thoát 0; sau khi bật sink và NRT thì `reconcile` PASS |
+| T16 | Độ trễ đồng bộ | Sau `sql/23`, `sql/41`: `SELECT * FROM C360.V_MIRROR_SYNC_LAG` | Có `LAN_SYNC_CUOI`; `reconcile` in `MIRROR_SYNC_LAG`; dashboard tab 3 có chỉ số |
+
 ### Ca golden (tạo bởi `seed`, kỳ vọng kiểm bằng `test_generator.py::test_golden_expectations`)
 | MA_CD | Tình huống | Kỳ vọng ở C360 |
 |---|---|---|

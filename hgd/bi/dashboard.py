@@ -58,9 +58,15 @@ with t2:
 with t3:
     bl = q("SELECT * FROM V_QUEUE_BACKLOG")
     last = q("SELECT MAX(START_TIME) AS LAST_OK FROM C360_SYNC_LOG WHERE JOB_TYPE='NRT' AND STATUS='OK'")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Dòng đang chờ trong Queue", int(bl.so_dong_cho.iloc[0]))
     c2.metric("Lô NRT thành công gần nhất", str(last.last_ok.iloc[0]))
+    try:
+        lag = q("SELECT * FROM V_MIRROR_SYNC_LAG")
+        c3.metric("Giây từ lần đồng bộ Mirror cuối", "-" if lag.giay_tu_lan_sync_cuoi.iloc[0] is None else int(lag.giay_tu_lan_sync_cuoi.iloc[0]),
+                  help=f"{int(lag.so_dong_1h.iloc[0])} dòng đồng bộ trong 1 giờ qua")
+    except Exception:  # chưa chạy sql/23, sql/41
+        c3.metric("Độ trễ đồng bộ Mirror", "chưa có SYNC_TS")
     m = q("SELECT * FROM V_SYNC_MONITOR_PHUT WHERE PHUT >= SYSDATE - 1/24 ORDER BY PHUT")
     if len(m):
         st.plotly_chart(px.line(m, x="phut", y=["so_khoa_bien_dong", "so_dong_merge", "so_dong_delete"], title="Khối lượng xử lý mỗi phút (1 giờ qua)"), use_container_width=True)

@@ -9,24 +9,28 @@ db-init:           ## tạo user, bảng, package, view, procedure
 	$(PY) -m hgd.tools.init_db
 seed:              ## nạp 100.000 nhân khẩu giả lập + danh mục
 	$(PY) -m hgd.generator.seed --people 100000 --truncate
-initial-load:      ## dựng lần đầu (CDC source -> Full Load -> index/trigger -> sink -> Map -> C360 Full Load)
+initial-load:      ## dựng lần đầu. THỨ TỰ KHÔNG ĐƯỢC ĐẢO: CDC nguồn -> Full Load Mirror -> index -> Map -> Full Load C360 -> trigger -> sink
 	$(PY) -m hgd.sync.mirror_ops prepare
 	$(PY) -m hgd.sync.cdc_ops source-create
 	$(PY) -m hgd.sync.full_load_spark --tables all
 	$(PY) -m hgd.sync.mirror_ops create-index
-	$(PY) -m hgd.sync.mirror_ops create-trigger
-	$(PY) -m hgd.sync.cdc_ops sink-create
 	$(PY) -m hgd.tools.call_proc PRC_REFRESH_MAP_DBHC
 	$(PY) -m hgd.tools.call_proc PRC_C360_FULL_LOAD
+	$(PY) -m hgd.sync.mirror_ops create-trigger
+	$(PY) -m hgd.sync.cdc_ops sink-create
 	$(PY) -m hgd.tools.call_proc PRC_REFRESH_DATAMART
 initial-load-py:   ## như initial-load nhưng Full Load bằng Python thuần (không cần Spark/Java/Maven)
 	$(PY) -m hgd.sync.mirror_ops prepare
+	$(PY) -m hgd.sync.cdc_ops source-create
 	$(PY) -m hgd.sync.full_load_python --tables all
 	$(PY) -m hgd.sync.mirror_ops create-index
-	$(PY) -m hgd.sync.mirror_ops create-trigger
 	$(PY) -m hgd.tools.call_proc PRC_REFRESH_MAP_DBHC
 	$(PY) -m hgd.tools.call_proc PRC_C360_FULL_LOAD
+	$(PY) -m hgd.sync.mirror_ops create-trigger
+	$(PY) -m hgd.sync.cdc_ops sink-create
 	$(PY) -m hgd.tools.call_proc PRC_REFRESH_DATAMART
+full-load-resume:  ## sau sự cố giữa chừng ở Full Load Mirror: chỉ nạp các khối chưa DONE
+	$(PY) -m hgd.sync.full_load_python --tables main --resume
 nrt-once:          ## chạy tay 1 lượt NRT (khi chưa bật Airflow/Scheduler)
 	$(PY) -m hgd.tools.call_proc PRC_C360_NRT
 delta:

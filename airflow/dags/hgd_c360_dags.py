@@ -1,6 +1,6 @@
 """3 DAG vận hành pipeline HGD -> C360.
 
- hgd_initial_load   (thủ công)  Dựng lần đầu / dựng lại: source CDC -> Full Load Spark -> index/trigger -> sink -> Map -> Full Load C360 -> Data Mart -> đối soát
+ hgd_initial_load   (thủ công)  Dựng lần đầu / dựng lại: source CDC -> Full Load Spark -> index -> Map -> Full Load C360 -> trigger -> sink -> Data Mart -> đối soát
  hgd_c360_nrt       (mỗi phút)  Gọi PRC_C360_NRT: Queue -> MERGE/DELETE C360. max_active_runs=1 (Oracle còn khóa SYNC_CONTROL lần nữa)
  hgd_c360_maintenance (30 phút) Làm mới Map DBHC + Data Mart; đối soát đầy đủ lúc 02:00 hằng ngày
 Không bật DBMS_SCHEDULER (sql/34) cùng lúc với DAG NRT.
@@ -46,10 +46,11 @@ with DAG("hgd_initial_load", start_date=datetime(2026, 1, 1), schedule=None, cat
         BashOperator(task_id="cdc_source_create", bash_command=f"{PY} hgd.sync.cdc_ops source-create"),
         BashOperator(task_id="spark_full_load", bash_command=f"{PY} hgd.sync.full_load_spark --tables all"),
         BashOperator(task_id="mirror_create_index", bash_command=f"{PY} hgd.sync.mirror_ops create-index"),
-        BashOperator(task_id="mirror_create_trigger", bash_command=f"{PY} hgd.sync.mirror_ops create-trigger"),
-        BashOperator(task_id="cdc_sink_create", bash_command=f"{PY} hgd.sync.cdc_ops sink-create"),
         PythonOperator(task_id="refresh_map_dbhc", python_callable=call_proc, op_args=["PRC_REFRESH_MAP_DBHC"]),
         PythonOperator(task_id="c360_full_load", python_callable=call_proc, op_args=["PRC_C360_FULL_LOAD"], execution_timeout=timedelta(hours=12)),
+        # Trigger + sink bật SAU Full Load C360: Queue không bị đẩy dữ liệu thừa lúc nạp nền; Kafka phát lại các thay đổi còn nợ
+        BashOperator(task_id="mirror_create_trigger", bash_command=f"{PY} hgd.sync.mirror_ops create-trigger"),
+        BashOperator(task_id="cdc_sink_create", bash_command=f"{PY} hgd.sync.cdc_ops sink-create"),
         PythonOperator(task_id="refresh_datamart", python_callable=call_proc, op_args=["PRC_REFRESH_DATAMART"]),
         BashOperator(task_id="reconcile", bash_command=f"{PY} hgd.recon.reconcile --sample 500"),
     ]

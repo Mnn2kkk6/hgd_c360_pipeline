@@ -9,6 +9,8 @@
 | Connector lỗi | `cdc_ops status` → FAILED | Xem `trace`; thường do thiếu ARCHIVELOG, quyền Debezium, hoặc bảng Mirror thiếu cột. Sau khi sửa: restart task qua REST `/connectors/<tên>/restart` |
 | Sink chậm | Lag consumer trong Kafka UI | Tăng `batch.size`, `tasks.max` (cần topic nhiều partition); kiểm tra trigger/Queue |
 | Docker/máy khởi động lại, Kafka không lên (`NodeExists` trong log) | `docker ps -a` thấy `hgd-kafka` Exited; Connect báo `No resolvable bootstrap urls` | ZooKeeper còn giữ đăng ký cũ của broker. Chờ ~30 giây rồi `docker start hgd-kafka`, sau đó `docker start hgd-connect`; source connector tự đọc tiếp từ vị trí đã lưu. Dữ liệu Kafka nằm ở volume nên không mất |
+| Full Load Mirror bị gián đoạn giữa chừng | Lệnh in `CHƯA XONG n/m khối`; bảng `MIRROR_LOAD_CHUNK` có khối `RUNNING/FAILED` | `python -m hgd.sync.full_load_python --tables main --resume` (hoặc `full_load_spark --resume`): chỉ nạp khối chưa DONE. Xem tiến độ: `SELECT STATUS, COUNT(*) FROM MIRROR_LOAD_CHUNK GROUP BY STATUS` |
+| Độ trễ đồng bộ Mirror tăng | `V_MIRROR_SYNC_LAG.GIAY_TU_LAN_SYNC_CUOI` lớn; dashboard tab 3 | Kiểm tra `cdc_ops status`, lag consumer của sink trong Kafka UI |
 | Cần dựng lại Mirror | — | DAG `hgd_initial_load` (hoặc `make initial-load`); xóa connector cũ trước: `cdc_ops delete hgd-mirror-sink` |
 | Nguồn có đợt biến động lớn | LogMiner trễ | Giảm tốc `delta.py --chunk/--sleep`; tăng `log.mining.batch.size.*`; theo dõi `V_QUEUE_BACKLOG` |
 

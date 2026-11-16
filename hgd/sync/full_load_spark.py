@@ -1,20 +1,24 @@
-"""FULL LOAD bằng PySpark: nguồn VSS -> vùng MIRROR (4 bảng), nạp lại nhiều lần KHÔNG nhân đôi (TRUNCATE rồi nạp).
+"""FULL LOAD bằng PySpark: nguồn VSS -> MIRROR. Dùng cho khối lượng lớn.
 
-  python -m hgd.sync.full_load_spark                 # tất cả bảng
-  python -m hgd.sync.full_load_spark --tables main   # chỉ bảng nhân khẩu
-Song song hóa: bảng lớn chia FULLLOAD_PARTITIONS phân vùng theo ORA_HASH(MA_CD) (số nguyên, đều, không lệch tỉnh).
+  python -m hgd.sync.full_load_spark                 # nạp mới
+  python -m hgd.sync.full_load_spark --resume        # sau sự cố: chỉ nạp các khối chưa DONE
+Khác bản trước (xử lý góp ý review):
+ * Chia khối theo khoảng MA_CD và truyền cho Spark qua `predicates` (không dùng ORA_HASH): mỗi dòng đọc 1 lần.
+ * Nạp theo "đợt" (mỗi đợt = N khối chạy song song, 1 job Spark); trạng thái từng khối ghi vào MIRROR_LOAD_CHUNK,
+   sự cố giữa chừng không phải nạp lại từ đầu (--resume).
+ * Lệch số dòng cuối cùng chỉ CẢNH BÁO (CDC bù); --strict để coi là lỗi.
 """
 from __future__ import annotations
 import argparse
+import os
 import re
 import time
 from pathlib import Path
 
 from hgd import config, db
 from hgd.config import ROOT, env
-
-DM_TABLES = ["VSS_DM_DANTOC", "VSS_DM_QUOC_TICH", "VSS_DM_DBHC"]
-MAIN = "VSS_HO_GD_NHANKHAU"
+from . import loadplan as lp
+from .full_load_python import DM_TABLES, KEY_COL, MAIN, count, prepare_plan
 
 
 def bare_number_columns() -> list[str]:
@@ -26,9 +30,7 @@ def bare_number_columns() -> list[str]:
 
 
 def _jar_conf() -> tuple[str, str]:
-    """Ưu tiên driver Oracle có sẵn trên máy (SPARK_OJDBC_JAR hoặc docker/connect/libs/ojdbc*.jar) để khỏi tải Maven
-    (mạng chặn repo1.maven.org); nếu không có mới để Spark tải qua spark.jars.packages."""
-    import os
+    """Ưu tiên driver Oracle có sẵn trên máy (SPARK_OJDBC_JAR hoặc docker/connect/libs/ojdbc*.jar) để khỏi tải Maven."""
     jar = os.environ.get("SPARK_OJDBC_JAR")
     if not jar:
         found = sorted((ROOT / "docker" / "connect" / "libs").glob("ojdbc*.jar"))
@@ -45,60 +47,78 @@ def spark_session():
             .config("spark.sql.session.timeZone", "Asia/Ho_Chi_Minh").getOrCreate())
 
 
-def _opts(schema: str) -> dict:
+def _props(schema: str, **extra) -> dict:
     u, p = config.credentials(schema)
-    return {"url": config.jdbc_url(), "user": u, "password": p, "driver": "oracle.jdbc.OracleDriver"}
+    return {"user": u, "password": p, "driver": "oracle.jdbc.OracleDriver", **{k: str(v) for k, v in extra.items()}}
 
 
-def load_table(spark, table: str, parts: int, fetch: int, batch: int) -> int:
-    src = _opts("vss")
-    if table == MAIN:
-        n = parts
-        q = f"(SELECT t.*, ORA_HASH(t.MA_CD, {n - 1}) AS HGD_PART FROM VSS.{table} t) q"
-        custom = ",".join(f"{c} LONG" for c in bare_number_columns())
-        df = (spark.read.format("jdbc").options(**src).option("dbtable", q).option("partitionColumn", "HGD_PART")
-              .option("lowerBound", 0).option("upperBound", n - 1).option("numPartitions", n)
-              .option("fetchsize", fetch).option("customSchema", custom).load().drop("HGD_PART"))
-    else:
-        df = spark.read.format("jdbc").options(**src).option("dbtable", f"VSS.{table}").option("fetchsize", fetch).load()
-    # Mirror là bản sao nguyên trạng: không biến đổi dữ liệu. Ghi bằng JDBC batch, mode append sau khi TRUNCATE.
-    (df.write.format("jdbc").options(**_opts("mirror")).option("dbtable", table).option("batchsize", batch)
-       .option("numPartitions", min(parts, 8)).mode("append").save())
-    return 0
-
-
-def truncate_mirror(tables: list[str]):
-    conn = db.connect("mirror")
-    with conn.cursor() as cur:
-        for t in tables:
-            cur.execute(f"TRUNCATE TABLE {t}")
-
-
-def count(schema: str, owner: str | None, table: str) -> int:
-    conn = db.connect(schema)
-    with conn.cursor() as cur:
-        cur.execute(f"SELECT COUNT(*) FROM {owner + '.' if owner else ''}{table}")
-        return cur.fetchone()[0]
+def load_wave(spark, table: str, key_col: str | None, wave: list[lp.Chunk], fetch: int, batch: int, parts_write: int) -> None:
+    mc = db.connect("mirror")
+    try:
+        for c in wave:
+            lp.mark(mc, table, c.chunk_id, "RUNNING")
+            if lp.needs_cleanup(c.status):               # khối từng chạy dở: xóa phần ghi dở trước khi nạp lại
+                where, binds = lp.where_binds(key_col, c.lo, c.hi)
+                with mc.cursor() as cur:
+                    cur.execute(f"DELETE FROM {table}{where}", binds)
+                mc.commit()
+        preds = [lp.predicate_literal(key_col, c.lo, c.hi) for c in wave]
+        extra = {"fetchsize": fetch}
+        if table == MAIN:
+            extra["customSchema"] = ",".join(f"{c} LONG" for c in bare_number_columns())
+        df = spark.read.jdbc(url=config.jdbc_url(), table=f"VSS.{table}", predicates=preds, properties=_props("vss", **extra))
+        (df.repartition(min(parts_write, max(len(wave), 1))).write
+           .jdbc(url=config.jdbc_url(), table=table, mode="append", properties=_props("mirror", batchsize=batch)))
+        for c in wave:
+            lp.mark(mc, table, c.chunk_id, "DONE")
+    except Exception as e:                               # noqa: BLE001
+        for c in wave:
+            try:
+                lp.mark(mc, table, c.chunk_id, "FAILED", err=str(e))
+            except Exception:                            # noqa: BLE001
+                pass
+        raise
+    finally:
+        mc.close()
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tables", default="all", help="all | main | dm")
-    ap.add_argument("--no-truncate", action="store_true")
+    ap.add_argument("--chunks", type=int, default=None, help="số khối cho bảng lớn (mặc định 4 x FULLLOAD_PARTITIONS)")
+    ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--strict", action="store_true")
+    ap.add_argument("--stop-after", type=int, default=None, help="(thử nghiệm) dừng sau N đợt để mô phỏng sự cố")
     a = ap.parse_args()
     tables = {"all": DM_TABLES + [MAIN], "main": [MAIN], "dm": DM_TABLES}[a.tables]
-    parts, fetch, batch = int(env("FULLLOAD_PARTITIONS", "8")), int(env("FULLLOAD_FETCHSIZE", "10000")), int(env("FULLLOAD_BATCHSIZE", "10000"))
-    if not a.no_truncate:
-        truncate_mirror(tables)
+    par, fetch, batch = int(env("FULLLOAD_PARTITIONS", "8")), int(env("FULLLOAD_FETCHSIZE", "10000")), int(env("FULLLOAD_BATCHSIZE", "10000"))
     spark = spark_session()
+    exit_code = 0
     for t in tables:
         t0 = time.time()
-        load_table(spark, t, parts, fetch, batch)
+        key_col = KEY_COL.get(t)
+        chunks = (a.chunks or par * 4) if key_col else 1
+        plan, resumed = prepare_plan(t, key_col, chunks, a.resume)
+        todo = [c for c in plan if c.status != "DONE"]
+        print(f"{t}: {'TIẾP TỤC' if resumed else 'NẠP MỚI'} - {len(plan)} khối, còn {len(todo)} khối")
+        waves = [todo[i:i + par] for i in range(0, len(todo), par)] if key_col else [todo]
+        for n, wave in enumerate(waves):
+            if a.stop_after is not None and n >= a.stop_after:
+                break
+            if wave:
+                load_wave(spark, t, key_col, wave, fetch, batch, par)
+        mc = db.connect("mirror"); final = lp.load_plan(mc, t); mc.close()
+        not_done = [c for c in final if c.status != "DONE"]
+        if not_done:
+            print(f"  CHƯA XONG {len(not_done)}/{len(final)} khối. Chạy lại với --resume.")
+            raise SystemExit(3 if a.stop_after is not None else 1)
         s, m = count("vss", "VSS", t), count("mirror", None, t)
-        print(f"{t:22s} nguồn={s:>12,} mirror={m:>12,} {'KHỚP' if s == m else 'LỆCH'}  ({time.time() - t0:.0f}s)")
-        if s != m:
-            raise SystemExit(f"Full Load {t} lệch số dòng (nguồn có thể đang biến động; CDC sẽ bù phần chênh sau khi bật sink)")
+        verdict, msg = lp.count_verdict(s, m, a.strict)
+        print(f"  {t:22s} nguồn={s:>12,} mirror={m:>12,} [{verdict}] {msg} ({time.time() - t0:.0f}s)")
+        if verdict == "FAIL":
+            exit_code = 1
     spark.stop()
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

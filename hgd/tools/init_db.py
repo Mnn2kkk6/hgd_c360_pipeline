@@ -8,9 +8,9 @@ PLAN = [
     ("sys-root", ["01_sys_debezium.sql"]),
     ("vss", ["10_vss_source.sql"]),
     ("c360", ["20_c360_tables.sql"]),
-    ("mirror", ["21_mirror_tables.sql"]),
+    ("mirror", ["21_mirror_tables.sql", "23_mirror_sync_ts.sql"]),
     ("sys-pdb", ["02_grants.sql"]),
-    ("c360", ["30_pkg_util.sql", "31_map_dbhc.sql", "32_view_normalized.sql", "33_procs_sync.sql", "40_datamart_bi.sql"]),
+    ("c360", ["30_pkg_util.sql", "31_map_dbhc.sql", "32_view_normalized.sql", "33_procs_sync.sql", "40_datamart_bi.sql", "41_mirror_lag_view.sql"]),
 ]
 
 

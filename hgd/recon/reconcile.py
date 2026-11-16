@@ -72,6 +72,15 @@ class Recon:
         self.add("C360_DUP_KEY", "MA_SO_BHXH trùng", 0, dup)
         self.add("QUEUE_BACKLOG", "dòng đang chờ", None, self.pending, "INFO")
 
+    def sync_lag(self):
+        """Độ trễ đồng bộ Mirror dựa trên SYNC_TS (cần sql/23 + sql/41). Thiếu thì bỏ qua, không lỗi."""
+        try:
+            self.cur.execute("SELECT GIAY_TU_LAN_SYNC_CUOI, SO_DONG_1H FROM V_MIRROR_SYNC_LAG")
+            sec, n1h = self.cur.fetchone()
+            self.add("MIRROR_SYNC_LAG", "giây từ lần đồng bộ cuối", None, sec, "INFO", f"{n1h} dòng được đồng bộ trong 1 giờ qua")
+        except Exception as e:                                       # noqa: BLE001
+            self.add("MIRROR_SYNC_LAG", "chưa có SYNC_TS/view (chạy sql/23, sql/41)", None, None, "INFO", str(e)[:200])
+
     # ---- Kiểm mẫu: Oracle vs bản tham chiếu Python
     def sample_check(self, n: int):
         # lấy mẫu: ưu tiên công dân nhiều hộ (khó nhất) + ngẫu nhiên
@@ -134,11 +143,11 @@ def main():
     a = ap.parse_args()
     conn = db.connect("c360")
     r = Recon(conn)
-    r.src_vs_mirror(); r.mirror_vs_c360(); r.sample_check(a.sample); r.dq_summary(); r.save()
+    r.src_vs_mirror(); r.mirror_vs_c360(); r.sync_lag(); r.sample_check(a.sample); r.dq_summary(); r.save()
     print(f"RUN {r.run_id}  ({datetime.now():%Y-%m-%d %H:%M:%S})")
     fails = 0
     for _, name, scope, exp, act, diff, st, note in r.results:
-        if st != "INFO" or name == "DQ_CLEAN":
+        if st != "INFO" or name in ("DQ_CLEAN", "MIRROR_SYNC_LAG"):
             print(f"{st:8s} {name:24s} {str(scope)[:40]:40s} exp={exp} act={act} diff={diff} {note or ''}")
         fails += st == "FAIL"
     sys.exit(1 if fails else 0)
