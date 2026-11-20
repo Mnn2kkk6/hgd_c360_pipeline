@@ -462,6 +462,8 @@ Mở giao diện tại http://localhost:8080. Các DAG được khai báo trong 
 
 Nếu đã khởi tạo pipeline thủ công ở phần 4.6, không cần chạy lại DAG **hgd_initial_load** trừ khi chủ đích dựng lại dữ liệu. Có thể bật DAG NRT và các DAG bảo trì/đối soát để vận hành định kỳ.
 
+**Lưu ý về Full Load trong DAG:** DAG **hgd_initial_load** hiện gọi **hgd.sync.full_load_spark --tables all**. Image Airflow đã cài OpenJDK 17 và PySpark 3.5.3, nhưng Spark vẫn cần Oracle JDBC driver tải được từ Maven hoặc được cấu hình cục bộ. Nếu mạng không truy cập Maven, hãy khởi tạo Full Load bằng Python theo mục 4.6 rồi chỉ dùng Airflow cho các DAG NRT, maintenance và reconciliation; không chạy DAG initial_load theo cấu hình mặc định.
+
 ### 6.3. Kafka UI (tùy chọn)
 
 ~~~powershell
