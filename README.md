@@ -403,13 +403,13 @@ Các endpoint hiện có:
 
 | Method | Endpoint | Mục đích |
 |---|---|---|
-| GET | /api/v1/ca-nhan/{ma}?loai=auto | Tra cứu một công dân theo mã BHXH, mã cũ hoặc số định danh |
-| POST | /api/v1/ca-nhan/batch | Tra cứu theo lô, tối đa 1.000 mã |
-| GET | /api/v1/ca-nhan?ho_ten=...&ngay_sinh=... | Tìm kiếm theo họ tên và ngày sinh |
-| GET | /api/v1/thay-doi?cursor=...&limit=... | Lấy danh sách bản ghi thay đổi theo cursor |
+| GET | /api/v1/ca-nhan/{ma}?loai=auto | Tra cứu theo MA_SO_BHXH → MA_SO_BHXH_CU → SO_DINH_DANH; 404 nếu không thấy, 409 nếu mơ hồ |
+| POST | /api/v1/ca-nhan/tra-cuu-lo | Tra cứu theo lô, tối đa 1.000 mã |
+| GET | /api/v1/ca-nhan/tim-kiem?ho_ten=...&ngay_sinh=... | Tìm kiếm họ tên (có/không dấu) kết hợp ngày sinh YYYY/YYYYMM/YYYYMMDD |
+| GET | /api/v1/ca-nhan/thay-doi?cursor=...&limit=... | Lấy danh sách thay đổi theo cursor (SYNC_DATE, ID) và độ trễ an toàn |
 | GET | /health | Kiểm tra trạng thái API |
 
-Các endpoint nghiệp vụ yêu cầu header **X-API-Key**. API key được lưu dưới dạng SHA-256 hash trong database; scope có thể giới hạn theo **lookup**, **batch**, **search**, **changes**.
+Các endpoint nghiệp vụ yêu cầu header **X-API-Key**. API key được lưu dưới dạng SHA-256 hash trong database; scope có thể giới hạn theo **lookup**, **batch**, **search**, **changes**. Các đường dẫn cũ `/api/v1/ca-nhan/batch`, `/api/v1/ca-nhan?ho_ten=...` và `/api/v1/thay-doi` vẫn hoạt động như alias tương thích ngược. Xem ví dụ gọi API và checklist nghiệm thu tại [docs/WEEK3_COMPLETION.md](docs/WEEK3_COMPLETION.md).
 
 ### 5.2. Dashboard BI
 
@@ -421,7 +421,7 @@ streamlit run hgd/bi/dashboard.py --server.port 8501
 
 Dashboard mặc định có 3 tab:
 
-1. **Nhân khẩu & định danh:** số lượng công dân theo địa bàn, tỷ lệ có số định danh, cơ cấu tuổi và giới tính.
+1. **Nhân khẩu & định danh:** số lượng công dân theo địa bàn, tỷ lệ có số định danh, cơ cấu tuổi, giới tính và tình trạng sống.
 2. **Chất lượng dữ liệu:** thống kê các loại lỗi trong DQ_FLAGS và tỷ lệ lỗi theo địa phương.
 3. **Giám sát đồng bộ:** Queue backlog, lịch sử NRT, độ trễ Mirror, lỗi đồng bộ và kết quả đối soát.
 
@@ -518,6 +518,7 @@ Kịch bản tích hợp cần chạy cùng Oracle và Kafka được mô tả t
 | [Review Response](docs/REVIEW_RESPONSE.md) | Các góp ý review và cách xử lý trong code |
 | [Test Plan](docs/TEST_PLAN.md) | Kịch bản kiểm thử, ca golden và tiêu chí đạt |
 | [BI Guide](docs/BI_GUIDE.md) | Nguồn dữ liệu và hướng dẫn kết nối công cụ BI |
+| [Week 3 Completion](docs/WEEK3_COMPLETION.md) | Đối soát, Dashboard BI, API chuẩn và checklist nghiệm thu Tuần 3 |
 | [Operations](docs/OPERATIONS.md) | Xử lý sự cố, giám sát và lưu ý hiệu năng |
 
 ## 10. Lưu ý và giới hạn
