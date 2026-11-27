@@ -24,7 +24,7 @@ Chạy theo thứ tự; mỗi bước có tiêu chí đạt.
 | T9 | Đua giữa NRT và Full Load | Chạy `delta` trong lúc gọi `PRC_C360_FULL_LOAD` | Không lỗi; sau Full Load + 2 phút `verify` PASS, recon PASS |
 | T10 | Phục hồi sink | `cdc_ops sink-pause`, chạy delta, `sink-resume` | Mirror bắt kịp; recon PASS |
 | T11 | Lỗi NRT | Cố ý làm view lỗi → `C360_SYNC_LOG.STATUS='ERROR'`, **Queue không bị xóa** | Sửa view → lô sau xử lý bù |
-| T12 | API | `uvicorn …`, tạo key, gọi 4 endpoint | Khớp mô tả; 409 với mã cũ trùng; audit ghi vào `C360_API_AUDIT_LOG` |
+| T12 | API | `uvicorn …`, tạo key, gọi `GET /ca-nhan/{ma}`, `POST /ca-nhan/tra-cuu-lo`, `GET /ca-nhan/tim-kiem`, `GET /ca-nhan/thay-doi` | Đúng thứ tự ưu tiên; batch tối đa 1.000; 404/409 đúng; cursor + lag đúng; audit ghi vào `C360_API_AUDIT_LOG` |
 | T13 | BI | `make bi` sau `PRC_REFRESH_DATAMART` | 3 tab hiển thị số liệu |
 
 | T14 | Full Load bị gián đoạn rồi chạy tiếp | `full_load_python --tables main --stop-after 3` (mô phỏng sự cố, thoát mã 3) rồi `--resume` | Lần 2 in `TIẾP TỤC`, chỉ nạp các khối còn lại; số dòng Mirror = nguồn; không TRUNCATE lại |
