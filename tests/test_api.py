@@ -143,3 +143,37 @@ def test_audit_written(client):
 def test_dob_clause():
     assert dob_clause(None) == ("", {})
     assert dob_clause("19900315")[1] == {"d8": "19900315", "d6": "199003", "d4": "1990"}
+
+
+def test_required_api_paths_and_static_route_priority(client):
+    batch = client.post("/api/v1/ca-nhan/tra-cuu-lo", headers=H, json={"ma": ["0100000001"]})
+    assert batch.status_code == 200
+    assert batch.json()["ket_qua"][0]["trang_thai"] == "FOUND"
+
+    search = client.get("/api/v1/ca-nhan/tim-kiem?ho_ten=Tran%20Thi%20Anh", headers=H)
+    assert search.status_code == 200
+    assert search.json()["so_ket_qua"] == 3
+
+    changes = client.get("/api/v1/ca-nhan/thay-doi?limit=100", headers=H)
+    assert changes.status_code == 200
+    assert changes.json()["so_ban_ghi"] == 7
+
+
+def test_audit_shutdown_flushes_all_batches():
+    from hgd.api.audit import AuditLogger
+
+    class Collector:
+        def __init__(self):
+            self.rows = []
+
+        def write_audit(self, rows):
+            self.rows.extend(rows)
+
+    collector = Collector()
+    writer = AuditLogger(collector, flush_seconds=60, batch=200, maxsize=1000)
+    writer.start()
+    for i in range(450):
+        writer.log(endpoint="test", sequence=i)
+    writer.stop()
+    assert len(collector.rows) == 450
+    assert [row["sequence"] for row in collector.rows] == list(range(450))
